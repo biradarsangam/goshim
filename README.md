@@ -5,7 +5,7 @@
 ## Install
 
 ```sh
-go get github.com/biradarsangam/goshim
+go get github.com/biradarsangam/goshim/go-shim
 ```
 
 The default build uses the Docker-compatible containerd registry backend.
@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/biradarsangam/goshim"
+	goshim "github.com/biradarsangam/goshim/go-shim"
 )
 
 func main() {
@@ -55,7 +55,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/biradarsangam/goshim"
+	goshim "github.com/biradarsangam/goshim/go-shim"
 )
 
 func main() {

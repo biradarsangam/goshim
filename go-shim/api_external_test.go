@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/biradarsangam/goshim"
+	goshim "github.com/biradarsangam/goshim/go-shim"
 )
 
 func TestPublicPackageCanBeImported(t *testing.T) {
