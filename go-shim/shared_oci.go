@@ -5,6 +5,7 @@ package goshim
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -40,18 +41,35 @@ func writeBlob(layoutDir string, mediaType string, data []byte) (ocispec.Descrip
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ocispec.Descriptor{}, err
 	}
+	desc := ocispec.Descriptor{MediaType: mediaType, Digest: dgst, Size: int64(len(data))}
 	dest := filepath.Join(dir, dgst.Hex())
-	if fi, err := os.Stat(dest); err == nil && fi.Size() == int64(len(data)) {
-		return ocispec.Descriptor{MediaType: mediaType, Digest: dgst, Size: int64(len(data))}, nil
+	if fi, err := os.Stat(dest); err == nil && fi.Mode().IsRegular() && fi.Size() == desc.Size {
+		return desc, nil
 	}
-	tmp := dest + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeLayoutFile(dest, data, 0o644); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	if err := os.Rename(tmp, dest); err != nil {
-		return ocispec.Descriptor{}, err
+	return desc, nil
+}
+
+// writeLayoutFile publishes a complete file by renaming it from a unique
+// sibling. The temporary file is created with mode subject to the umask.
+func writeLayoutFile(path string, data []byte, mode os.FileMode) error {
+	tmp := filepath.Join(filepath.Dir(path), ".goshim-"+cryptorand.Text()+".tmp")
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
 	}
-	return ocispec.Descriptor{MediaType: mediaType, Digest: dgst, Size: int64(len(data))}, nil
+	defer os.Remove(tmp)
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(tmp, path)
 }
 
 // pushStagedManifest writes and tags a manifest in an existing OCI staging
@@ -200,21 +218,19 @@ func retryDelay(attempt int) time.Duration {
 // Slow-speed detection (cancel when far below the recent median rate) went
 // with the HuggingFace downloader that fed it samples — see src/hf.
 type stallReader struct {
-	r      io.Reader
-	timer  *time.Timer
-	cancel context.CancelFunc
+	r       io.Reader
+	timer   *time.Timer
+	timeout time.Duration
 }
 
 func newStallReader(r io.Reader, timeout time.Duration, cancel context.CancelFunc) *stallReader {
-	sr := &stallReader{r: r, cancel: cancel}
-	sr.timer = time.AfterFunc(timeout, cancel)
-	return sr
+	return &stallReader{r: r, timer: time.AfterFunc(timeout, cancel), timeout: timeout}
 }
 
 func (sr *stallReader) Read(p []byte) (int, error) {
 	n, err := sr.r.Read(p)
 	if n > 0 {
-		sr.timer.Reset(dlStallTimeout) // bytes arrived, reset stall clock
+		sr.timer.Reset(sr.timeout)
 	}
 	return n, err
 }
@@ -257,18 +273,18 @@ func (s *stallReadCloser) Close() error {
 // trip the http.Client even sees as in progress.
 type stallWriter struct {
 	content.Writer
-	timer  *time.Timer
-	cancel context.CancelFunc
+	timer   *time.Timer
+	timeout time.Duration
 }
 
 func newStallWriter(w content.Writer, timeout time.Duration, cancel context.CancelFunc) *stallWriter {
-	return &stallWriter{Writer: w, timer: time.AfterFunc(timeout, cancel), cancel: cancel}
+	return &stallWriter{Writer: w, timer: time.AfterFunc(timeout, cancel), timeout: timeout}
 }
 
 func (sw *stallWriter) Write(p []byte) (int, error) {
 	n, err := sw.Writer.Write(p)
 	if n > 0 {
-		sw.timer.Reset(dlStallTimeout) // bytes accepted, reset stall clock
+		sw.timer.Reset(sw.timeout)
 	}
 	return n, err
 }
@@ -311,28 +327,28 @@ func isHTTP4xx(err error) bool {
 // now retry natively in Rust (src/hf/client.rs); the remaining callers are
 // OCI registry copies, which never carried one.
 func retryStream(ctx context.Context, label string, isPermanent func(error) bool, attempt func() error) error {
-	var lastErr error
-	for i := 0; i < dlMaxAttempts; i++ {
-		if i > 0 {
-			delay := retryDelay(i)
-			fmt.Fprintf(os.Stderr, "\n[goshim] retrying %s (attempt %d/%d, wait %v)\n", label, i+1, dlMaxAttempts, delay)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
-			}
+	for number := 1; ; number++ {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		err := attempt()
 		if err == nil {
 			return nil
 		}
-		lastErr = err
-		if isPermanent != nil && isPermanent(err) {
-			break
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		fmt.Fprintf(os.Stderr, "[goshim] %s error: %v\n", label, err)
+		if number == dlMaxAttempts || (isPermanent != nil && isPermanent(err)) {
+			return fmt.Errorf("%s failed on attempt %d: %w", label, number, err)
+		}
+		delay := retryDelay(number)
+		fmt.Fprintf(os.Stderr, "\n[goshim] %s error: %v. Retrying (attempt %d/%d, wait %v)\n", label, err, number+1, dlMaxAttempts, delay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-	return fmt.Errorf("%s failed after %d attempts: %w", label, dlMaxAttempts, lastErr)
 }
 
 // progressTrackingReadCloser wraps an io.ReadCloser, feeding every

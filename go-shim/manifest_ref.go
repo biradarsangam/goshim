@@ -16,10 +16,8 @@
 // a small pointer (the manifest's descriptor) rather than the manifest
 // itself.
 //
-// Like Ollama's manifest.WriteManifest, there's no locking around this:
-// a torn or racing write can now only ever corrupt its own ref file, not
-// every model's, so the old index.json.lock isn't needed. Writes still
-// go through a temp-file rename, since that costs nothing extra.
+// Each ref is published by renaming a temporary file. Concurrent writes
+// to the same ref leave the descriptor from whichever rename completes last.
 package goshim
 
 import (
@@ -230,27 +228,7 @@ func writeManifestRef(layoutDir, ref string, manifestDesc ocispec.Descriptor) er
 	if err != nil {
 		return err
 	}
-	// A uniquely-named temp file, not a fixed one: two concurrent writers
-	// of the same ref must not truncate/interleave each other's write.
-	out, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := out.Name()
-	if _, err := out.Write(data); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeLayoutFile(path, data, 0o600)
 }
 
 // findManifestForPush resolves ref to a manifest descriptor for
