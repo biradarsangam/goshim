@@ -80,6 +80,40 @@ func main() {
 fails, the downloaded layout remains available. The generic `Push` and `Pull`
 continue to support non-ModelPack OCI artifacts.
 
+## Run a Linux workload with libkrun
+
+`goshim-run` runs a command in a libkrun microVM using a prepared Linux root
+filesystem for the host architecture. Libkrun is the only execution backend.
+The `go-shim` package handles OCI registry operations separately.
+
+Build with cgo, a C compiler, `pkg-config`, and
+[libkrun 1.x](https://github.com/libkrun/libkrun/releases) (1.19.4 or later),
+with the matching libkrunfw available to the dynamic loader. The runner supports
+Linux amd64/arm64 with access to `/dev/kvm` and macOS on Apple Silicon.
+
+```sh
+CGO_ENABLED=1 go build -tags libkrun -o goshim-run ./cmd/goshim-run
+```
+
+On macOS, sign the binary after building it. If libkrunfw is installed outside
+the loader's search path, point `DYLD_FALLBACK_LIBRARY_PATH` to its library
+directory, such as `/opt/homebrew/lib`.
+
+```sh
+codesign --force --sign - --entitlements cmd/goshim-run/hypervisor.entitlements ./goshim-run
+```
+
+```sh
+./goshim-run --rootfs ./rootfs --cpus 2 --memory-mib 512 -- /bin/sh -c 'uname -a'
+```
+
+Use a dedicated rootfs directory. The guest can write to it through virtio-fs.
+The guest has no external network interface and starts with a minimal
+environment instead of inheriting host variables. The runner passes through
+the guest's exit status. Libkrun 1.x passes arguments via the kernel command
+line, so use short UTF-8 arguments without double quotes or control whitespace
+and an absolute guest executable path without spaces.
+
 ## Test
 
 ```sh
