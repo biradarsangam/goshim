@@ -15,9 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/distribution/registry/api/errcode"
-	v2 "github.com/docker/distribution/registry/api/v2"
-
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -306,6 +303,9 @@ func pullToLayout(ctx context.Context, ref, layoutDir string) error {
 	dgst, err := manifest.Digest(manifestData)
 	if err != nil {
 		return fmt.Errorf("digest manifest: %w", err)
+	}
+	if reqDigest := digestFromRef(ref); reqDigest != "" && dgst != reqDigest {
+		return fmt.Errorf("manifest digest mismatch: requested %s, got %s", reqDigest, dgst)
 	}
 	manifestDesc := ocispec.Descriptor{
 		MediaType: manifest.GuessMIMEType(manifestData),
@@ -751,16 +751,28 @@ func fetchManifestRaw(ctx context.Context, ref string) ([]byte, error) {
 	if int64(len(data)) > maxManifestBytes {
 		return nil, fmt.Errorf("manifest is %d bytes, over the %d-byte limit", len(data), maxManifestBytes)
 	}
+	if reqDigest := digestFromRef(ref); reqDigest != "" {
+		if err := verifyContentDigest("manifest", reqDigest, data); err != nil {
+			return nil, err
+		}
+	}
 	return data, nil
+}
+
+type errorCoder interface {
+	ErrorCode() interface{ String() string }
 }
 
 // isBackendNotFound reports go.podman.io/image's typed "manifest
 // unknown", which docker_client.go recognizes the same way. See
 // sigstore.go's isNotFoundError for why a typed answer matters.
 func isBackendNotFound(err error) bool {
-	var ec errcode.ErrorCoder
-	return errors.As(err, &ec) &&
-		(ec.ErrorCode() == v2.ErrorCodeManifestUnknown || ec.ErrorCode() == v2.ErrorCodeNameUnknown)
+	var ec errorCoder
+	if errors.As(err, &ec) {
+		code := ec.ErrorCode().String()
+		return code == "MANIFEST_UNKNOWN" || code == "NAME_UNKNOWN"
+	}
+	return false
 }
 
 // isImageNotFound reports whether err, from reading ref's manifest, is the
@@ -778,12 +790,12 @@ func imageNotFound(err error, ref string, loggedIn func() bool) bool {
 	if isBackendNotFound(err) {
 		return true
 	}
-	var ec errcode.ErrorCoder
+	var ec errorCoder
 	if !errors.As(err, &ec) {
 		return false
 	}
-	switch ec.ErrorCode() {
-	case errcode.ErrorCodeDenied, errcode.ErrorCodeUnauthorized:
+	switch ec.ErrorCode().String() {
+	case "DENIED", "UNAUTHORIZED":
 		return isDockerHubRef(ref) && !loggedIn()
 	}
 	return false

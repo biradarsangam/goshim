@@ -694,6 +694,15 @@ func pullToLayout(ctx context.Context, ref, layoutDir string) error {
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
 	}
+	if reqDigest := digestFromRef(ref); reqDigest != "" {
+		if err := verifyContentDigest("manifest", reqDigest, manifestData); err != nil {
+			return err
+		}
+	} else if manifestDesc.Digest != "" {
+		if err := verifyContentDigest("manifest", manifestDesc.Digest, manifestData); err != nil {
+			return err
+		}
+	}
 	if _, err := writeBlob(layoutDir, manifestDesc.MediaType, manifestData); err != nil {
 		return fmt.Errorf("write manifest blob: %w", err)
 	}
@@ -719,6 +728,9 @@ func pullToLayout(ctx context.Context, ref, layoutDir string) error {
 	configRC.Close()
 	if readErr != nil {
 		return fmt.Errorf("read config: %w", readErr)
+	}
+	if err := verifyContentDigest("config", manifest.Config.Digest, configData); err != nil {
+		return err
 	}
 	if _, err := writeBlob(layoutDir, manifest.Config.MediaType, configData); err != nil {
 		return fmt.Errorf("write config blob: %w", err)
@@ -855,6 +867,9 @@ func resolveManifestDigest(ctx context.Context, ref string) (digest.Digest, erro
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", ref, err)
 	}
+	if reqDigest := digestFromRef(ref); reqDigest != "" && desc.Digest != reqDigest {
+		return "", fmt.Errorf("manifest digest mismatch: requested %s, resolved %s", reqDigest, desc.Digest)
+	}
 	return desc.Digest, nil
 }
 
@@ -886,6 +901,15 @@ func fetchManifestRaw(ctx context.Context, ref string) ([]byte, error) {
 	}
 	if int64(len(data)) > maxManifestBytes {
 		return nil, fmt.Errorf("manifest is over the %d-byte limit", maxManifestBytes)
+	}
+	if reqDigest := digestFromRef(ref); reqDigest != "" {
+		if err := verifyContentDigest("manifest", reqDigest, data); err != nil {
+			return nil, err
+		}
+	} else if desc.Digest != "" {
+		if err := verifyContentDigest("manifest", desc.Digest, data); err != nil {
+			return nil, err
+		}
 	}
 	return data, nil
 }

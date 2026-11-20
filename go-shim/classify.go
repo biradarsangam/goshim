@@ -6,6 +6,8 @@ package goshim
 import (
 	"fmt"
 	"strings"
+
+	digest "github.com/opencontainers/go-digest"
 )
 
 // errHFNotHandledHere reports a HuggingFace reference passed to the
@@ -67,3 +69,27 @@ func normalizeTag(ref string) string {
 	}
 	return ref
 }
+
+// digestFromRef extracts the digest from ref if ref is pinned by digest (e.g. "repo@sha256:...").
+// It returns a zero-value Digest if ref carries no valid digest.
+func digestFromRef(ref string) digest.Digest {
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		if d, err := digest.Parse(ref[i+1:]); err == nil {
+			return d
+		}
+	}
+	return ""
+}
+
+// verifyContentDigest verifies that content hashes to expected, if expected is non-empty.
+func verifyContentDigest(kind string, expected digest.Digest, content []byte) error {
+	if expected == "" {
+		return nil
+	}
+	actual := digest.FromBytes(content)
+	if actual != expected {
+		return fmt.Errorf("%s digest mismatch: expected %s, got %s", kind, expected, actual)
+	}
+	return nil
+}
+
