@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: go vet ./...
+
+  libkrun:
+    name: libkrun build and tests (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Install libkrun 1.x
+        run: |
+          brew tap libkrun/krun
+          brew trust libkrun/krun
+          brew install libkrun/krun/libkrun
+          version="$(pkg-config --modversion libkrun)"
+          case "$version" in
+            1.*) pkg-config --atleast-version=1.19.4 libkrun ;;
+            *) echo "Expected libkrun 1.x, found $version" >&2; exit 1 ;;
+          esac
+      - name: Test the libkrun runner
+        run: go test -race -tags libkrun ./cmd/goshim-run
+      - name: Build and sign the runner
+        # GitHub-hosted Apple Silicon runners lack nested virtualization.
+        run: |
+          binary="$RUNNER_TEMP/goshim-run"
+          go build -tags libkrun -o "$binary" ./cmd/goshim-run
+          codesign --force --sign - --entitlements cmd/goshim-run/hypervisor.entitlements "$binary"
+          codesign --verify --strict "$binary"
+          "$binary" --help
