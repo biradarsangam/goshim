@@ -2,7 +2,9 @@ package goshim
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -21,54 +23,68 @@ func (blockingWriter) Status() (content.Status, error)                          
 func (blockingWriter) Truncate(int64) error                                               { return nil }
 func (blockingWriter) Close() error                                                       { return nil }
 func (w blockingWriter) Write(p []byte) (int, error) {
-	<-w.unblock // never sent in the "stall" test — simulates a write that never returns
+	<-w.unblock
 	return len(p), nil
 }
 
 func TestStallWriterCancelsOnBlockedWrite(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	sw := newStallWriter(blockingWriter{unblock: make(chan struct{})}, 100*time.Millisecond, cancel)
-	defer sw.stop()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		unblock := make(chan struct{})
+		sw := newStallWriter(blockingWriter{unblock: unblock}, time.Second, cancel)
+		defer func() {
+			close(unblock)
+			synctest.Wait()
+			sw.stop()
+		}()
 
-	done := make(chan struct{})
-	go func() {
-		sw.Write([]byte("hello")) // blocks forever; only returns if the test itself unblocks it
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		// expected: the stall timer fired and canceled ctx while Write
-		// was still blocked.
-	case <-done:
-		t.Fatal("Write returned before it should have (test double is broken)")
-	case <-time.After(2 * time.Second):
-		t.Fatal("stall timer never canceled ctx despite Write blocking indefinitely")
-	}
+		go sw.Write([]byte("hello"))
+		time.Sleep(2 * time.Second)
+		if ctx.Err() != context.Canceled {
+			t.Fatal("stall timer did not cancel the blocked write")
+		}
+	})
 }
 
 func TestStallWriterResetsOnProgress(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	unblock := make(chan struct{})
-	sw := newStallWriter(blockingWriter{unblock: unblock}, 150*time.Millisecond, cancel)
-	defer sw.stop()
-
-	// Let the write succeed well within the stall timeout — ctx must
-	// NOT be canceled just because a write happened, only if one never
-	// returns.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		unblock := make(chan struct{})
 		close(unblock)
-	}()
+		sw := newStallWriter(blockingWriter{unblock: unblock}, time.Second, cancel)
+		defer sw.stop()
+		time.Sleep(500 * time.Millisecond)
+		if _, err := sw.Write([]byte("hello")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		checkStallReset(t, ctx)
+	})
+}
 
-	if _, err := sw.Write([]byte("hello")); err != nil {
-		t.Fatalf("Write: %v", err)
+func TestStallReaderResetsOnProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		sr := newStallReader(strings.NewReader("hello"), time.Second, cancel)
+		defer sr.stop()
+		time.Sleep(500 * time.Millisecond)
+		if _, err := sr.Read(make([]byte, 1)); err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		checkStallReset(t, ctx)
+	})
+}
+
+func checkStallReset(t *testing.T, ctx context.Context) {
+	t.Helper()
+	time.Sleep(750 * time.Millisecond)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("stall timer fired before the extended deadline: %v", err)
 	}
-
-	select {
-	case <-ctx.Done():
-		t.Fatal("ctx was canceled despite Write completing well within the timeout")
-	case <-time.After(300 * time.Millisecond):
-		// expected: no cancellation.
+	time.Sleep(500 * time.Millisecond)
+	if ctx.Err() != context.Canceled {
+		t.Fatal("stall timer did not fire after the extended deadline")
 	}
 }
